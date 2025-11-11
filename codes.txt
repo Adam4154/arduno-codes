@@ -1,4 +1,69 @@
+#include <LCD_I2C.h>
+#include <WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+#include <DHT11.h>
+#include <ESP32Servo.h>
 
+// Pin definitions
+int trigpin = 13;
+int echopin = 12;
+int redLedpin = 14;
+int whiteLedpin = 27;
+int buzzerpin = 32;
+int ldrpin = 35;
+int servopin = 5;
+int relaypin1 = 16; // lamp relay
+int relaypin2 = 17; // fan relay
+int dht11pin = 15;
+
+// initialize sensors and lcd
+DHT11 dht11(dht11pin);
+LCD_I2C lcd(0x27, 16, 2);
+
+// WiFi credentials
+const char* ssid = "king nur wifi";
+const char* password = "987654321";
+
+// Adafruit IO configuration
+#define AIO_SERVER "io.adafruit.com"
+#define AIO_SERVERPORT 1883
+
+
+// Servo
+Servo myServo;
+
+// WiFi and MQTT clients
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT, );
+
+// Adafruit IO Feeds
+Adafruit_MQTT_Publish temperatureFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/temperature");
+Adafruit_MQTT_Publish humidityFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/humidity");
+Adafruit_MQTT_Publish ldrFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/ldr");
+Adafruit_MQTT_Publish distanceFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/distance");
+Adafruit_MQTT_Publish motionFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/motion");
+
+// Control feeds
+Adafruit_MQTT_Subscribe lightControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/light-control");
+Adafruit_MQTT_Subscribe fanControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/fan-control");
+Adafruit_MQTT_Subscribe windowControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/window-control");
+
+// Configurable thresholds - UPDATED AS REQUESTED
+const int LIGHT_ON_THRESHOLD = 2700;       // LDR value > 2700 => Light ON, Window OPEN
+const int LIGHT_OFF_THRESHOLD = 1500;      // LDR value < 1500 => Light OFF, Window CLOSE
+const int TEMP_FAN_ON = 28;                // Temp >= 28 => Fan ON
+const int TEMP_FAN_OFF = 26;               // Temp < 26 => Fan OFF (NEW)
+
+// Distance threshold in cm
+int detectionDistance = 50;
+
+// Function declarations
+long getDistance();
+float readTemperature();
+float readHumidity();
+void connectToWiFi();
+void MQTT_connect();
 
 void setup() {
   // Initialize pins
