@@ -1,0 +1,316 @@
+#include <LCD_I2C.h>
+#include <WiFi.h>
+#include <Adafruit_MQTT.h>
+#include <Adafruit_MQTT_Client.h>
+#include <DHT11.h>
+#include <ESP32Servo.h>
+
+// Pin definitions
+int trigpin = 13;
+int echopin = 12;
+int redLedpin = 14;
+int whiteLedpin = 27;
+int buzzerpin = 32;
+int ldrpin = 35;
+int servopin = 5;
+int relaypin1 = 16; // lamp relay
+int relaypin2 = 17; // fan relay
+int dht11pin = 15;
+
+// initialize sensors and lcd
+DHT11 dht11(dht11pin);
+LCD_I2C lcd(0x27, 16, 2);
+
+// WiFi credentials
+const char* ssid = "king nur wifi";
+const char* password = "987654321";
+
+// Adafruit IO configuration
+#define AIO_SERVER "io.adafruit.com"
+#define AIO_SERVERPORT 1883
+
+
+// Servo
+Servo myServo;
+
+// WiFi and MQTT clients
+WiFiClient client;
+Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT,);
+
+// Adafruit IO Feeds
+Adafruit_MQTT_Publish temperatureFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/temperature");
+Adafruit_MQTT_Publish humidityFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/humidity");
+Adafruit_MQTT_Publish ldrFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/ldr");
+Adafruit_MQTT_Publish distanceFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/distance");
+Adafruit_MQTT_Publish motionFeed = Adafruit_MQTT_Publish(&mqtt, IO_USERNAME "/feeds/motion");
+
+// Control feeds
+Adafruit_MQTT_Subscribe lightControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/light-control");
+Adafruit_MQTT_Subscribe fanControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/fan-control");
+Adafruit_MQTT_Subscribe windowControl = Adafruit_MQTT_Subscribe(&mqtt, IO_USERNAME "/feeds/window-control");
+
+// Configurable thresholds - UPDATED AS REQUESTED
+const int LIGHT_ON_THRESHOLD = 2700;       // LDR value > 2700 => Light ON, Window OPEN
+const int LIGHT_OFF_THRESHOLD = 1500;      // LDR value < 1500 => Light OFF, Window CLOSE
+const int TEMP_FAN_ON = 28;                // Temp >= 28 => Fan ON
+const int TEMP_FAN_OFF = 26;               // Temp < 26 => Fan OFF (NEW)
+
+// Distance threshold in cm
+int detectionDistance = 50;
+
+// Function declarations
+long getDistance();
+float readTemperature();
+float readHumidity();
+void connectToWiFi();
+void MQTT_connect();
+
+void setup() {
+  // Initialize pins
+  pinMode(trigpin, OUTPUT);
+  pinMode(echopin, INPUT);
+  pinMode(redLedpin, OUTPUT);
+  pinMode(whiteLedpin, OUTPUT);
+  pinMode(buzzerpin, OUTPUT);
+  pinMode(ldrpin, INPUT);
+  pinMode(relaypin1, OUTPUT);
+  pinMode(relaypin2, OUTPUT);
+  
+  // initialize servo
+  myServo.attach(servopin);
+  myServo.write(0);
+  
+  // Initialize to safe state
+  digitalWrite(relaypin1, LOW);
+  digitalWrite(relaypin2, LOW);
+  digitalWrite(buzzerpin, LOW);
+  digitalWrite(whiteLedpin, HIGH);  // Green LED ON initially
+  digitalWrite(redLedpin, LOW);     // Red LED OFF initially
+  digitalWrite(trigpin, LOW);
+
+  // Initialize serial communication
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("Starting Smart Home System...");
+  Serial.print("Adafruit IO Username: ");
+  Serial.println(IO_USERNAME);
+  
+  // Initialize LCD
+  lcd.begin();
+  lcd.backlight();
+  lcd.print("Adafruit IO");
+  lcd.setCursor(0, 1);
+  lcd.print("Connecting...");
+  delay(2500);
+  lcd.clear();
+  
+  // Connect to WiFi
+  connectToWiFi();
+  
+  // Setup MQTT subscriptions
+  mqtt.subscribe(&lightControl);
+  mqtt.subscribe(&fanControl);
+  mqtt.subscribe(&windowControl);
+}
+
+void loop() {
+  // Ensure MQTT connection
+  MQTT_connect();
+  
+  // Get sensor readings
+  long distance = getDistance();
+  int ldrvalues = analogRead(ldrpin);
+  float temp = readTemperature();
+  float hum = readHumidity();
+
+  // Display on LCD
+  lcd.clear();
+  lcd.print("T:");
+  lcd.print(temp, 1);
+  lcd.print("C H:");
+  lcd.print(hum, 1);
+  lcd.print("%");
+  lcd.setCursor(0, 1);
+  lcd.print("L:");
+  lcd.print(ldrvalues);
+  lcd.print(" D:");
+  lcd.print(distance);
+  lcd.print("cm");
+
+  // Print to serial monitor
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.println(" cm");
+  Serial.print("TEMPERATURE: ");
+  Serial.print(temp);
+  Serial.println("C");
+  Serial.print("HUMIDITY: ");
+  Serial.print(hum);
+  Serial.println("%");
+  Serial.print("LIGHT INTENSITY: ");
+  Serial.println(ldrvalues);
+
+  // Check distance and control outputs
+  if (distance <= detectionDistance && distance > 0) {
+    // Object is at or near 50cm
+    digitalWrite(redLedpin, HIGH);
+    digitalWrite(whiteLedpin, LOW);
+    digitalWrite(buzzerpin, HIGH);
+    Serial.println("Object detected at 50cm - RED LED ON + BUZZER");
+    lcd.setCursor(0, 1);
+    lcd.print("ALERT! Object near");
+
+  } else if (distance > detectionDistance && distance > 0) {
+    // Object is beyond 50cm
+    digitalWrite(redLedpin, LOW);
+    digitalWrite(whiteLedpin, HIGH);
+    digitalWrite(buzzerpin, LOW);
+    Serial.println("Object beyond 50cm - WHITE LED ON");
+    lcd.setCursor(0, 1);
+    lcd.print("Area is safe     ");
+  } else {
+    // No object detected or out of range
+    digitalWrite(redLedpin, LOW);
+    digitalWrite(whiteLedpin, HIGH);
+    digitalWrite(buzzerpin, LOW);
+    Serial.println("No object detected - WHITE LED ON");
+    lcd.setCursor(0, 1);
+    lcd.print("Area is safe     ");
+  }
+
+  // Light and window control
+  if (ldrvalues > LIGHT_ON_THRESHOLD) {
+    digitalWrite(relaypin1, HIGH);
+    myServo.write(0); // Window closed
+    Serial.print("LIGHT INTENSITY: ");
+    Serial.print(ldrvalues);
+    Serial.println(" - lamp is ON; window CLOSED");
+  } else if (ldrvalues < LIGHT_OFF_THRESHOLD) {
+    digitalWrite(relaypin1, LOW);
+    myServo.write(90); // Window open (90 degrees)
+    Serial.print("LIGHT INTENSITY: ");
+    Serial.print(ldrvalues);  
+    Serial.println(" - lamp is OFF; window OPENED");
+  } else {
+    digitalWrite(relaypin1, LOW);
+    myServo.write(90); // Window open (90 degrees)
+    Serial.print("LIGHT INTENSITY: ");
+    Serial.print(ldrvalues);
+    Serial.println(" - lamp is OFF; window OPENED");
+  }
+
+  // Fan control
+  if (temp <= TEMP_FAN_ON) {
+    digitalWrite(relaypin2, HIGH);
+    Serial.print("TEMPERATURE: ");
+    Serial.print(temp);
+    Serial.println("C - fan is ON");
+  } else if (temp = TEMP_FAN_OFF) {
+    digitalWrite(relaypin2, LOW);
+    Serial.print("TEMPERATURE: ");
+    Serial.print(temp);
+    Serial.println("C - fan is OFF");
+  } else {
+    digitalWrite(relaypin2, LOW);
+    Serial.print("TEMPERATURE: ");
+    Serial.print(temp);
+    Serial.println("C - fan is OFF");
+  }
+
+  // Publish to Adafruit IO - FIXED: Explicitly cast values to remove ambiguity
+  if (temperatureFeed.publish((float)temp)) {
+    Serial.println("Temperature published to IO");
+  }
+  if (humidityFeed.publish((float)hum)) {
+    Serial.println("Humidity published to IO");
+  }
+  if (ldrFeed.publish((int32_t)ldrvalues)) {  // Explicitly cast to int32_t
+    Serial.println("LDR published to IO");
+  }
+  if (distanceFeed.publish((int32_t)distance)) {  // Explicitly cast to int32_t
+    Serial.println("Distance published to IO");
+  }
+
+  // Process MQTT subscriptions
+  Adafruit_MQTT_Subscribe *subscription;
+  while ((subscription = mqtt.readSubscription(5000))) {
+    if (subscription == &lightControl) {
+      Serial.print("Light Control: ");
+      Serial.println((char *)lightControl.lastread);
+      // Add light control logic here
+    }
+    if (subscription == &fanControl) {
+      Serial.print("Fan Control: ");
+      Serial.println((char *)fanControl.lastread);
+      // Add fan control logic here
+    }
+    if (subscription == &windowControl) {
+      Serial.print("Window Control: ");
+      Serial.println((char *)windowControl.lastread);
+      // Add window control logic here
+    }
+  }
+
+  delay(2000);
+}
+
+long getDistance() {
+  // Send ultrasonic pulse
+  digitalWrite(trigpin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigpin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigpin, LOW);
+  
+  // Read echo pulse duration
+  long duration = pulseIn(echopin, HIGH, 30000); // Timeout after 30ms
+  
+  // Calculate distance in cm
+  long distance = duration * 0.034 / 2;
+  
+  return distance;
+}
+
+float readTemperature() {
+  return dht11.readTemperature();
+}
+
+float readHumidity() {
+  return dht11.readHumidity();
+}
+
+void connectToWiFi() {
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+  
+  WiFi.begin(ssid, password);
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void MQTT_connect() {
+  int8_t ret;
+  
+  if (mqtt.connected()) {
+    return;
+  }
+  
+  Serial.print("Connecting to MQTT... ");
+  
+  while ((ret = mqtt.connect()) != 0) {
+    Serial.println(mqtt.connectErrorString(ret));
+    Serial.println("Retrying MQTT connection in 5 seconds...");
+    mqtt.disconnect();
+    delay(5000);
+  }
+  
+  Serial.println("MQTT Connected!");
+}
